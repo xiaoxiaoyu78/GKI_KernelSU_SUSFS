@@ -1,0 +1,191 @@
+name: KSU_Official_SUSFS_6.6.89_Dual
+
+on:
+  push:
+    branches: [ksu689-dual]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: 6.6.89-KSU-SUSFS-${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 200
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [patched, vanilla]
+    steps:
+      - name: 取补丁与脚本
+        run: |
+          mkdir -p susfs_port
+          curl -fsSL --retry 5 --retry-all-errors -o susfs_port/ksu331_susfs_core.patch "https://aka.doubaocdn.com/s/sa0AQfEQQp"
+          curl -fsSL --retry 5 --retry-all-errors -o susfs_port/ksu689_runtime_fixes.patch "https://aka.doubaocdn.com/s/FGj2pZeVJM"
+          curl -fsSL --retry 5 --retry-all-errors -o susfs_port/filter_patches.py "https://aka.doubaocdn.com/s/FECg259Er2"
+          cd susfs_port
+          printf '%s  %s\n' \
+            a9da7f104fb08451f89dd4c85dab9acb858d0bcd403fcaadbb092a5a299d904e ksu331_susfs_core.patch \
+            0d509ee3a721b045bb4cda8fe1c1daff8a2a3c0b2059a3f1d891f43642e68fa9 ksu689_runtime_fixes.patch \
+            f28217954db41ca034295d684c5965c0b954ea592e0bceb8c0c9de1032177d79 filter_patches.py > sums.txt
+          sha256sum -c sums.txt
+          ls -l
+
+      - uses: actions/checkout@v4
+        with:
+          repository: aosp-mirror/kernel_common
+          ref: 14220ae4ce65ba58711f65587ef4e93f408892fb
+          path: kernel
+
+      - name: 零宽修复
+        run: |
+          curl -fsSL -o fix1.patch "https://raw.githubusercontent.com/xiaoxiaoyu78/gki-unicode-fix/main/fix1.patch"
+          cd kernel && patch -p1 < ../fix1.patch
+          ! grep -q "ignore_init" fs/unicode/mkutf8data.c && echo ZERO_WIDTH_OK
+
+      - name: 集成官方 KernelSU v3.3.1
+        run: |
+          cd kernel
+          git clone https://github.com/tiann/KernelSU KernelSU
+          sh KernelSU/kernel/setup.sh v3.3.1
+          git -C KernelSU log -1 --format="%H %s"
+          test -e drivers/kernelsu/Kbuild
+
+      - name: 注入 SUSFS 胶水层
+        run: |
+          cd kernel/KernelSU
+          patch -p1 --batch -F3 < "$GITHUB_WORKSPACE/susfs_port/ksu331_susfs_core.patch"
+          ! find . -name "*.rej" | grep -q . && echo CORE_PATCH_OK
+          grep -q "susfs_set_batch_sid" kernel/selinux/rules.c && echo BATCH_SID_OK
+          grep -q "susfs_is_current_ksu_domain" kernel/selinux/selinux.c && echo GLUE_OK
+
+      - name: 运行期修复（${{ matrix.variant }}）
+        run: |
+          cd kernel/KernelSU
+          if [ "${{ matrix.variant }}" = "patched" ]; then
+            patch -p1 --batch -F3 < "$GITHUB_WORKSPACE/susfs_port/ksu689_runtime_fixes.patch"
+            ! find . -name "*.rej" | grep -q . && echo FIXES_PATCHED_OK
+            grep -q "compile-time SUSFS layer" kernel/feature/selinux_hide.c && echo NOHOOK_OK
+            grep -q "susfs_uinfo" kernel/supercall/susfs_reboot.c && echo REBOOT_ABI_OK
+          else
+            echo "vanilla：保留运行期 patch_text 与原始 susfs_reboot ABI"
+            grep -q "(void __user \*\*)arg" kernel/supercall/susfs_reboot.c && echo VANILLA_ABI_CONFIRM
+          fi
+
+      - name: 拉取 susfs4ksu（固定提交）
+        run: |
+          git clone -b gki-android15-6.6 https://gitlab.com/simonpunk/susfs4ksu susfs4ksu
+          git -C susfs4ksu checkout f98f08223bbf469cc0a1542166383d253557fc32
+          git -C susfs4ksu log -1 --format="%H %s"
+          python3 susfs_port/filter_patches.py
+
+      - name: 应用 susfs 内核侧文件与补丁
+        run: |
+          cp susfs4ksu/kernel_patches/fs/susfs.c kernel/fs/susfs.c
+          cp susfs4ksu/kernel_patches/include/linux/susfs.h kernel/include/linux/susfs.h
+          cp susfs4ksu/kernel_patches/include/linux/susfs_def.h kernel/include/linux/susfs_def.h
+          cd kernel
+          patch -p1 --forward -F3 < ../50_kernel_filtered.patch
+          ! find . -name "*.rej" | grep -q . && echo KERNEL_PATCH_OK
+          python3 -c "p='fs/proc/base.c';s=open(p).read();a='#include <linux/cpufreq_times.h>\n';assert a in s;s=s.replace(a,a+'#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n#include <linux/susfs_def.h>\n#endif\n',1);open(p,'w').write(s);print('base.c include ok')"
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flex bison bc cpio lz4 zstd xz-utils python3 file gawk dwarves libssl-dev libelf-dev libncurses-dev clang lld llvm
+
+      - name: 配置 gki_defconfig
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          scripts/config --file out/.config --enable KSU
+          scripts/config --file out/.config --enable KPROBES
+          scripts/config --file out/.config --enable EXT4_FS
+          scripts/config --file out/.config --enable KALLSYMS
+          scripts/config --file out/.config --enable KSU_SUSFS
+          for o in KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS; do
+            scripts/config --file out/.config --enable $o || true
+          done
+          scripts/config --file out/.config --disable KSU_DEBUG || true
+          scripts/config --file out/.config --disable KPM || true
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          scripts/config --file out/.config --set-str LOCALVERSION ""
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          grep -E "^CONFIG_(KSU|KSU_SUSFS)" out/.config | sort
+          grep -q "^CONFIG_KSU=y" out/.config
+          grep -q "^CONFIG_KSU_SUSFS=y" out/.config
+
+      - name: 编译
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd kernel
+          set +e
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$(nproc) LOCALVERSION="-android15-8-g14220ae4ce65-ab13680582-4k" 2>&1 | tee /tmp/build.log
+          rc=${PIPESTATUS[0]}
+          if [ $rc -ne 0 ]; then
+            echo "::error::build failed rc=$rc"
+            grep -nE "error:" /tmp/build.log | head -20
+            cd "$GITHUB_WORKSPACE"
+            rm -rf logrepo && mkdir logrepo && cd logrepo
+            git init -q .
+            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            gzip -c /tmp/build.log > "build-${{ matrix.variant }}.log.gz"
+            git checkout -q -b ci-logs
+            git add .
+            git -c user.email=ci@local -c user.name=ci commit -q -m "log ${{ matrix.variant }} ${GITHUB_RUN_ID}"
+            git push -q -f origin ci-logs
+            exit 1
+          fi
+
+      - name: 校验产物
+        run: |
+          cd kernel
+          cat out/include/config/kernel.release
+          test -n "$(grep -E " susfs_init| susfs_show_version" out/System.map | head -1)"
+          test -n "$(grep -E " ksu_" out/System.map | head -1)"
+          if strings out/arch/arm64/boot/Image | grep -q "skroot"; then echo "::error::skroot found"; exit 1; fi
+          if strings out/arch/arm64/boot/Image | grep -q "compile-time SUSFS layer"; then MARK=WITH_FIX; else MARK=WITHOUT_FIX; fi
+          echo "镜像标记: $MARK"
+          if [ "${{ matrix.variant }}" = "patched" ] && [ "$MARK" != "WITH_FIX" ]; then echo "::error::patched 版缺修复标记"; exit 1; fi
+          if [ "${{ matrix.variant }}" = "vanilla" ] && [ "$MARK" != "WITHOUT_FIX" ]; then echo "::error::vanilla 版出现修复标记"; exit 1; fi
+
+      - name: 下载 VioletAVB 原厂 boot
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o VioletAVB_boot.img "https://aka.doubaocdn.com/s/X5BgJRDVmY"
+          test $(stat -c%s VioletAVB_boot.img) -eq 100663296
+
+      - name: 重打包与 AVB 串签
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o avb.tar.gz "https://github.com/showdo/AOSP-Testkey-BootSigner/archive/refs/heads/main.tar.gz"
+          tar -xzf avb.tar.gz
+          chmod +x AOSP-Testkey-BootSigner-main/tools/magiskboot
+          mkdir -p work && cp VioletAVB_boot.img work/boot.img
+          cd work
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot unpack boot.img
+          rm -f kernel && cp ../kernel/out/arch/arm64/boot/Image kernel
+          ../AOSP-Testkey-BootSigner-main/tools/magiskboot repack boot.img
+          cp new-boot.img ../AOSP-Testkey-BootSigner-main/boot.img
+          cd ../AOSP-Testkey-BootSigner-main
+          python3 rebuild_avb.py --chained-mode
+          python3 tools/avbtool.py info_image --image boot.img | grep -E "Algorithm|Public key" | head -3
+          test $(stat -c%s boot.img) -eq 100663296
+          cd ..
+          cp AOSP-Testkey-BootSigner-main/boot.img "boot_6.6.89_kernelsu_susfs_${{ matrix.variant }}.img"
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ksu-susfs-6.6.89-${{ matrix.variant }}-${{ github.run_id }}
+          name: ksu-susfs-6.6.89-${{ matrix.variant }}-${{ github.run_id }}
+          body: |
+            6.6.89 GKI（kernel_common @14220ae4）
+            - CVE-2024-43093 零宽修复
+            - 官方 KernelSU v3.3.1（tiann，非 Next / 非 SukiSU）
+            - susfs4ksu gki-android15-6.6 @f98f0822，CONFIG_KSU_SUSFS=y，无 KPM
+            - 变体 ${{ matrix.variant }}：patched = 关闭 selinux_hide 运行期热补 + susfs_reboot 指针 ABI 修复；vanilla = 原样对照
+            管理器：KernelSU_v3.3.1_32680-release.apk
+          files: |
+            boot_6.6.89_kernelsu_susfs_${{ matrix.variant }}.img
+            kernel/out/arch/arm64/boot/Image
+          fail_on_unmatched: false
