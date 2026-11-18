@@ -17,19 +17,36 @@ jobs:
       matrix:
         variant: [patched, vanilla]
     steps:
-      - name: 取补丁与脚本
+      - name: 按清单取补丁与校验哈希
         run: |
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/manifest.json "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/ksu689-dual/susfs_port/manifest.json"
+          cat /tmp/manifest.json
           mkdir -p susfs_port
-          curl -fsSL --retry 5 --retry-all-errors -o susfs_port/ksu331_susfs_core.patch "https://aka.doubaocdn.com/s/CN1psscN5f"
-          curl -fsSL --retry 5 --retry-all-errors -o susfs_port/ksu689_runtime_fixes.patch "https://aka.doubaocdn.com/s/V9RxR97pPe"
-          curl -fsSL --retry 5 --retry-all-errors -o susfs_port/filter_patches.py "https://aka.doubaocdn.com/s/FECg259Er2"
-          cd susfs_port
-          printf '%s  %s\n' \
-            7eb8332693c2f03a220eebe06e46655ac365f8263711673e340fdd6b2cf99854 ksu331_susfs_core.patch \
-            d1b70aeffb403b34aaee79f18af70ad4e70e76be7455eed0f2b8d03ad871323f ksu689_runtime_fixes.patch \
-            f28217954db41ca034295d684c5965c0b954ea592e0bceb8c0c9de1032177d79 filter_patches.py > sums.txt
-          sha256sum -c sums.txt
-          ls -l
+          python3 - <<'PY'
+          import json, urllib.request
+          m = json.load(open('/tmp/manifest.json'))
+          for k, v in m.items():
+              if not k.startswith('url_'):
+                  continue
+              name = k[4:]
+              urllib.request.urlretrieve(v, 'susfs_port/' + name)
+              print('got', name)
+          PY
+          python3 - <<'PY'
+          import json, hashlib, os, sys
+          m = json.load(open('/tmp/manifest.json'))
+          bad = []
+          for k, v in m.items():
+              if not k.startswith('sha_'):
+                  continue
+              n = k[4:]
+              h = hashlib.sha256(open(os.path.join('susfs_port', n), 'rb').read()).hexdigest()
+              print(('OK   ' if h == v else 'BAD  ') + n + ' ' + h)
+              if h != v:
+                  bad.append(n)
+          sys.exit(1 if bad else 0)
+          PY
+          ls -l susfs_port
 
       - uses: actions/checkout@v4
         with:
@@ -54,18 +71,22 @@ jobs:
       - name: 注入 SUSFS 胶水层
         run: |
           cd kernel/KernelSU
-          patch -p1 --batch -F3 < "$GITHUB_WORKSPACE/susfs_port/ksu331_susfs_core.patch"
+          patch -p1 --batch -F3 < "$GITHUB_WORKSPACE/susfs_port/core.patch"
           ! find . -name "*.rej" | grep -q . && echo CORE_PATCH_OK
           grep -q "susfs_set_batch_sid" kernel/selinux/rules.c && echo BATCH_SID_OK
-          grep -q "susfs_is_current_ksu_domain" kernel/selinux/selinux.c && echo GLUE_OK
           grep -q "linux/susfs_def.h" kernel/hook/setuid_hook.c && echo SETUID_INCLUDE_OK
           grep -q "ksu_susfs_reboot_cmd" kernel/supercall/supercall.h && echo SUPERCALL_DECL_OK
+          c_ksu=$(grep -c "u32 susfs_ksu_sid" kernel/selinux/selinux.c)
+          c_pra=$(grep -c "u32 susfs_priv_app_sid" kernel/selinux/selinux.c)
+          c_dom=$(grep -c "^bool susfs_is_current_ksu_domain" kernel/selinux/selinux.c)
+          echo "定义次数 ksu_sid=$c_ksu priv_app=$c_pra domain_fn=$c_dom"
+          [ "$c_ksu" = 1 ] && [ "$c_pra" = 1 ] && [ "$c_dom" = 1 ] && echo DUP_FREE_OK
 
       - name: 运行期修复（${{ matrix.variant }}）
         run: |
           cd kernel/KernelSU
           if [ "${{ matrix.variant }}" = "patched" ]; then
-            patch -p1 --batch -F3 < "$GITHUB_WORKSPACE/susfs_port/ksu689_runtime_fixes.patch"
+            patch -p1 --batch -F3 < "$GITHUB_WORKSPACE/susfs_port/fixes.patch"
             ! find . -name "*.rej" | grep -q . && echo FIXES_PATCHED_OK
             grep -q "compile-time SUSFS layer" kernel/feature/selinux_hide.c && echo NOHOOK_OK
             grep -q "susfs_uinfo" kernel/supercall/susfs_reboot.c && echo REBOOT_ABI_OK
@@ -79,7 +100,7 @@ jobs:
           git clone -b gki-android15-6.6 https://gitlab.com/simonpunk/susfs4ksu susfs4ksu
           git -C susfs4ksu checkout f98f08223bbf469cc0a1542166383d253557fc32
           git -C susfs4ksu log -1 --format="%H %s"
-          python3 susfs_port/filter_patches.py
+          python3 susfs_port/filter.py
 
       - name: 应用 susfs 内核侧文件与补丁
         run: |
