@@ -1,8 +1,8 @@
 {
-  "url_core.patch": "https://aka.doubaocdn.com/s/Rr9kBi04YJ",
-  "sha_core.patch": "43f234ac61a1a3872722827005f4bd0d0c97e7b885f49d8a2159cc8bb4fa6118",
-  "url_fixes.patch": "https://aka.doubaocdn.com/s/V9RxR97pPe",
-  "sha_fixes.patch": "d1b70aeffb403b34aaee79f18af70ad4e70e76be7455eed0f2b8d03ad871323f",
+  "url_core.patch": "https://aka.doubaocdn.com/s/ZOKNroN55t",
+  "sha_core.patch": "ce906f52a928ee59f40551b8726d7b00d95adaa81841c23ae2b7e5fa6913b5f4",
+  "url_fixes.patch": "https://aka.doubaocdn.com/s/sChUm50WTv",
+  "sha_fixes.patch": "eab2aa7c1fec3e071ca29539a205dadba3b29ebfd23e4d92e5284cf7c7d20585",
   "url_filter.py": "https://aka.doubaocdn.com/s/FECg259Er2",
   "sha_filter.py": "f28217954db41ca034295d684c5965c0b954ea592e0bceb8c0c9de1032177d79"
 }
