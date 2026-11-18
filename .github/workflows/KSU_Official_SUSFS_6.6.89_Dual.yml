@@ -20,13 +20,13 @@ jobs:
       - name: 取补丁与脚本
         run: |
           mkdir -p susfs_port
-          curl -fsSL --retry 5 --retry-all-errors -o susfs_port/ksu331_susfs_core.patch "https://aka.doubaocdn.com/s/sa0AQfEQQp"
-          curl -fsSL --retry 5 --retry-all-errors -o susfs_port/ksu689_runtime_fixes.patch "https://aka.doubaocdn.com/s/FGj2pZeVJM"
+          curl -fsSL --retry 5 --retry-all-errors -o susfs_port/ksu331_susfs_core.patch "https://aka.doubaocdn.com/s/CN1psscN5f"
+          curl -fsSL --retry 5 --retry-all-errors -o susfs_port/ksu689_runtime_fixes.patch "https://aka.doubaocdn.com/s/V9RxR97pPe"
           curl -fsSL --retry 5 --retry-all-errors -o susfs_port/filter_patches.py "https://aka.doubaocdn.com/s/FECg259Er2"
           cd susfs_port
           printf '%s  %s\n' \
-            a9da7f104fb08451f89dd4c85dab9acb858d0bcd403fcaadbb092a5a299d904e ksu331_susfs_core.patch \
-            0d509ee3a721b045bb4cda8fe1c1daff8a2a3c0b2059a3f1d891f43642e68fa9 ksu689_runtime_fixes.patch \
+            7eb8332693c2f03a220eebe06e46655ac365f8263711673e340fdd6b2cf99854 ksu331_susfs_core.patch \
+            d1b70aeffb403b34aaee79f18af70ad4e70e76be7455eed0f2b8d03ad871323f ksu689_runtime_fixes.patch \
             f28217954db41ca034295d684c5965c0b954ea592e0bceb8c0c9de1032177d79 filter_patches.py > sums.txt
           sha256sum -c sums.txt
           ls -l
@@ -58,6 +58,8 @@ jobs:
           ! find . -name "*.rej" | grep -q . && echo CORE_PATCH_OK
           grep -q "susfs_set_batch_sid" kernel/selinux/rules.c && echo BATCH_SID_OK
           grep -q "susfs_is_current_ksu_domain" kernel/selinux/selinux.c && echo GLUE_OK
+          grep -q "linux/susfs_def.h" kernel/hook/setuid_hook.c && echo SETUID_INCLUDE_OK
+          grep -q "ksu_susfs_reboot_cmd" kernel/supercall/supercall.h && echo SUPERCALL_DECL_OK
 
       - name: 运行期修复（${{ matrix.variant }}）
         run: |
@@ -125,12 +127,12 @@ jobs:
           rc=${PIPESTATUS[0]}
           if [ $rc -ne 0 ]; then
             echo "::error::build failed rc=$rc"
-            grep -nE "error:" /tmp/build.log | head -20
+            grep -nE "error:" /tmp/build.log | head -30
             cd "$GITHUB_WORKSPACE"
             rm -rf logrepo && mkdir logrepo && cd logrepo
             git init -q .
             git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            gzip -c /tmp/build.log > "build-${{ matrix.variant }}.log.gz"
+            gzip -c /tmp/build.log > "build-${{ matrix.variant }}-${GITHUB_RUN_ID}.log.gz"
             git checkout -q -b ci-logs
             git add .
             git -c user.email=ci@local -c user.name=ci commit -q -m "log ${{ matrix.variant }} ${GITHUB_RUN_ID}"
